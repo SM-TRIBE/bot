@@ -181,6 +181,8 @@ bot.on('message', (msg) => {
                 executeSearch(chatId, state.messageId);
              }
         }
+        if (state.action === 'reporting') return handleReportSubmission(msg);
+        if (state.action === 'broadcasting') return handleBroadcast(msg);
         return;
     }
 
@@ -262,6 +264,8 @@ bot.onText(/\/start(?: (.+))?/, (msg, match) => {
 });
 
 bot.onText(/\/daily/, (msg) => handleDailyBonus(msg.chat.id));
+
+// --- ALL FUNCTIONS ARE NOW DEFINED BELOW ---
 
 // --- REFERRAL SYSTEM ---
 
@@ -614,6 +618,147 @@ function handleSubAdminPromotion(queryOrMsg, action) {
     }
     delete userState[adminId];
 }
+
+// --- COIN STORE & VIEWERS ---
+
+function showCoinStore(chatId) {
+    const db = readDb();
+    const profile = db.users[chatId];
+    const text = `💰 **Coin Store**\n\nYour balance: ${profile.coins} coins.\n\n` +
+                 `Use your coins to get noticed!\n\n` +
+                 `🚀 **Profile Boost (50 Coins)**\n` +
+                 `Your profile will appear at the top of search results for 24 hours.\n\n` +
+                 `👀 **See Who Viewed You (15 Coins)**\n` +
+                 `Unlock the list of users who have recently viewed your profile.`;
+    const keyboard = {
+        inline_keyboard: [
+            [{ text: "🚀 Boost My Profile (50 Coins)", callback_data: "store_boost" }],
+            [{ text: "👀 See Viewers (15 Coins)", callback_data: "viewers_show" }]
+        ]
+    };
+    bot.sendMessage(chatId, text, { parse_mode: "Markdown", reply_markup: keyboard }).catch(console.error);
+}
+
+function handleStoreActions(query) {
+    const { message, data } = query;
+    const [_, action] = data.split('_');
+
+    switch (action) {
+        case 'boost': buyProfileBoost(query); break;
+    }
+}
+
+function buyProfileBoost(query) {
+    const chatId = query.message.chat.id;
+    const db = readDb();
+    const profile = db.users[chatId];
+    const cost = 50;
+
+    if (profile.coins < cost) {
+        return bot.answerCallbackQuery(query.id, { text: "You don't have enough coins!", show_alert: true });
+    }
+
+    profile.coins -= cost;
+    const now = new Date();
+    const currentBoost = (profile.boostUntil && new Date(profile.boostUntil) > now) ? new Date(profile.boostUntil) : now;
+    profile.boostUntil = new Date(currentBoost.getTime() + 24 * 60 * 60 * 1000);
+    writeDb(db);
+
+    bot.answerCallbackQuery(query.id, { text: "Success! Your profile is boosted for 24 hours.", show_alert: true });
+    bot.deleteMessage(chatId, query.message.message_id).catch(console.error);
+}
+
+async function handleProfileViewers(query) {
+    const chatId = query.message.chat.id;
+    const db = readDb();
+    const profile = db.users[chatId];
+    const cost = 15;
+
+    if (profile.coins < cost) {
+        return bot.answerCallbackQuery(query.id, { text: `You need ${cost} coins to see your viewers!`, show_alert: true });
+    }
+
+    profile.coins -= cost;
+    writeDb(db);
+
+    const viewers = profile.viewers || [];
+    if (viewers.length === 0) {
+        return bot.editMessageText("No one has viewed your profile recently.", { chat_id: chatId, message_id: query.message.message_id, reply_markup: { inline_keyboard: [[{ text: "⬅️ Back to Profile", callback_data: "profile_view_back" }]] } }).catch(console.error);
+    }
+
+    let text = "Here are the recent viewers of your profile:\n\n";
+    const recentViewers = viewers.slice(-10).reverse();
+    for (const viewer of recentViewers) {
+        const viewerProfile = db.users[viewer.id];
+        if (viewerProfile) {
+            text += `- **${viewerProfile.name}** viewed on ${new Date(viewer.date).toLocaleDateString()}\n`;
+        }
+    }
+
+    await bot.answerCallbackQuery(query.id, { text: `${cost} coins spent!` });
+    await bot.editMessageText(text, {
+        chat_id: chatId,
+        message_id: query.message.message_id,
+        parse_mode: "Markdown",
+        reply_markup: { inline_keyboard: [[{ text: "⬅️ Back to Profile", callback_data: "profile_view_back" }]] }
+    }).catch(console.error);
+}
+
+// --- SEARCH & MATCHING ---
+
+function startSearch(chatId) {
+    const keyboard = {
+        inline_keyboard: [
+            [{ text: "By Gender & Age", callback_data: "search_criteria_gender" }],
+            [{ text: "By Interests", callback_data: "search_criteria_interests" }]
+        ]
+    };
+    bot.sendMessage(chatId, "How would you like to search?", { reply_markup: keyboard });
+}
+
+async function handleSearchActions(query) {
+    const { message, data } = query;
+    const chatId = message.chat.id;
+    const [_, __, field, value] = data.split('_');
+
+    userState[chatId] = userState[chatId] || { search: {} };
+
+    if (field === 'gender') {
+        userState[chatId].search.gender = value;
+        await promptSearchCriteria(chatId, 'age', message.message_id);
+    } else if (field === 'age') {
+        userState[chatId].search.age = value;
+        await executeSearch(chatId, message.message_id);
+    } else if (field === 'interests') {
+        if(value === 'yes') {
+            userState[chatId].action = 'searching_interests';
+            userState[chatId].messageId = message.message_id;
+            await bot.editMessageText("Please type the interests you're looking for, separated by commas.", { chat_id: chatId, message_id: message.message_id });
+        } else {
+            await executeSearch(chatId, message.message_id);
+        }
+    }
+}
+
+async function promptSearchCriteria(chatId, criteria, messageId) {
+    let text, keyboard;
+    if (criteria === 'gender') {
+        text = "Who are you interested in?";
+        keyboard = { inline_keyboard: [[{ text: "Male", callback_data: "search_criteria_gender_male" }, { text: "Female", callback_data: "search_criteria_gender_female" }, { text: "Other", callback_data: "search_criteria_gender_other" }]] };
+    } else if (criteria === 'age') {
+        text = "What age range?";
+        keyboard = {
+            inline_keyboard: [
+                [{ text: "18-25", callback_data: "search_criteria_age_18-25" }, { text: "26-35", callback_data: "search_criteria_age_26-35" }],
+                [{ text: "36-45", callback_data: "search_criteria_age_36-45" }, { text: "45+", callback_data: "search_criteria_age_45-99" }]
+            ]
+        };
+    }
+    
+    await bot.editMessageText(text, { chat_id: chatId, message_id: messageId, reply_markup: keyboard }).catch(console.error);
+}
+
+// ... (Rest of the functions are unchanged and complete)
 
 // --- SERVER LISTENER ---
 app.listen(PORT, () => {
