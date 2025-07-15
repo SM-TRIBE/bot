@@ -1,4 +1,4 @@
-// Main bot file for Telegram: index.js (Fully Functional Version)
+// Main bot file for Telegram: index.js (Fully Debugged & Stable Version)
 
 const TelegramBot = require('node-telegram-bot-api');
 const express = require('express');
@@ -131,14 +131,18 @@ function getProfileText(profile, extended = false, forAdmin = false) {
 }
 
 async function sendMainMenu(chatId) {
-    const db = readDb();
-    const userProfile = db.users[chatId];
-    const text = userProfile
-        ? `Welcome back, ${userProfile.name}! This is your main menu.`
-        : "Welcome to the Dating Bot! Please create a profile to get started.";
-    
-    const keyboard = userProfile ? KEYBOARDS.main(chatId) : KEYBOARDS.createProfile;
-    await bot.sendMessage(chatId, text, { reply_markup: keyboard }).catch(console.error);
+    try {
+        const db = readDb();
+        const userProfile = db.users[chatId];
+        const text = userProfile
+            ? `Welcome back, ${userProfile.name}! This is your main menu.`
+            : "Welcome to the Dating Bot! Please create a profile to get started.";
+        
+        const keyboard = userProfile ? KEYBOARDS.main(chatId) : KEYBOARDS.createProfile;
+        await bot.sendMessage(chatId, text, { reply_markup: keyboard });
+    } catch (error) {
+        console.error(`Error in sendMainMenu for chat ${chatId}:`, error.code);
+    }
 }
 
 // --- WEBHOOK & MESSAGE ROUTERS ---
@@ -191,12 +195,12 @@ bot.on('message', (msg) => {
         case '🚀 Create Profile': startProfileCreation(chatId); break;
         case '👑 Admin Panel':
             if (String(chatId) === ADMIN_CHAT_ID) {
-                bot.sendMessage(chatId, "👑 Welcome to the Admin Panel.", { reply_markup: KEYBOARDS.admin });
+                bot.sendMessage(chatId, "👑 Welcome to the Admin Panel.", { reply_markup: KEYBOARDS.admin }).catch(console.error);
             }
             break;
         case '🛡️ Sub-Admin Panel':
              if (db.subAdmins.includes(String(chatId))) {
-                bot.sendMessage(chatId, "🛡️ Welcome to the Sub-Admin Panel.", { reply_markup: KEYBOARDS.subAdmin });
+                bot.sendMessage(chatId, "🛡️ Welcome to the Sub-Admin Panel.", { reply_markup: KEYBOARDS.subAdmin }).catch(console.error);
             }
             break;
         case '⬅️ Back to Main Menu': sendMainMenu(chatId); break;
@@ -206,7 +210,7 @@ bot.on('message', (msg) => {
         case '🛡️ Manage Sub-Admins': manageSubAdmins(chatId); break;
         case '💰 Grant Coins': promptForCoinGrant(chatId); break;
         case '📢 Broadcast': promptForBroadcast(chatId); break;
-        case '👥 View Users': listAllUsers(chatId, null, 0, true); break; // Sub-admin view
+        case '👥 View Users': listAllUsers(chatId, null, 0, true); break;
     }
 });
 
@@ -242,6 +246,7 @@ bot.on('callback_query', (query) => {
             case 'report':
                 if(p1 === 'prompt') promptForReportReason(chatId, p2);
                 break;
+            case 'store': handleStoreActions(query); break;
         }
     } catch (error) {
         console.error("Error in callback query handler:", error);
