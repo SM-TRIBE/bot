@@ -1,0 +1,29 @@
+# render.yaml
+# This file tells Render how to deploy your bot.
+# You can connect your GitHub repository and Render will build
+# and deploy your project automatically using this file.
+
+services:
+  # A Web Service for our Telegram Bot
+  - type: web
+    name: telegram-dating-bot
+    # Runtime environment
+    env: node
+    # The command to run to start the bot
+    startCommand: "npm start"
+    # Specify the Node.js version
+    plan: free
+    # Let Render know we have a persistent disk for our database
+    disks:
+      - name: data-disk
+        mountPath: /usr/src/app/data
+        sizeGB: 1
+    # Environment variables
+    envVars:
+      - key: TELEGRAM_TOKEN
+        sync: false # Do not sync this from the repo; set it in the Render dashboard
+      - key: RENDER_EXTERNAL_URL
+        fromService:
+          type: web
+          name: telegram-dating-bot
+          property: url
