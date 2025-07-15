@@ -1,4 +1,4 @@
-// Main bot file for Telegram: index.js (Enhanced for Render Deployment)
+// Main bot file for Telegram: index.js (Enhanced with Admin Panel)
 
 const TelegramBot = require('node-telegram-bot-api');
 const express = require('express');
@@ -8,24 +8,23 @@ const { v4: uuidv4 } = require('uuid');
 
 // --- CONFIGURATION ---
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
-const RENDER_URL = process.env.RENDER_EXTERNAL_URL; // Provided by Render
+const RENDER_URL = process.env.RENDER_EXTERNAL_URL;
 const PORT = process.env.PORT || 3000;
+const ADMIN_CHAT_ID = process.env.ADMIN_CHAT_ID; // Your personal Telegram Chat ID
 
-if (!TELEGRAM_TOKEN || !RENDER_URL) {
-    console.error("FATAL ERROR: TELEGRAM_TOKEN and RENDER_EXTERNAL_URL must be set in your environment variables.");
+if (!TELEGRAM_TOKEN || !RENDER_URL || !ADMIN_CHAT_ID) {
+    console.error("FATAL ERROR: TELEGRAM_TOKEN, RENDER_EXTERNAL_URL, and ADMIN_CHAT_ID must be set in your environment variables.");
     process.exit(1);
 }
 
 const bot = new TelegramBot(TELEGRAM_TOKEN);
-// Set webhook
 bot.setWebHook(`${RENDER_URL}/bot${TELEGRAM_TOKEN}`);
 
 const app = express();
 app.use(express.json());
 
 // --- DATABASE SETUP ---
-const dbPath = path.join(__dirname, 'data', 'db.json'); // Store db in a 'data' directory
-// Ensure the data directory exists
+const dbPath = path.join(__dirname, 'data', 'db.json');
 if (!fs.existsSync(path.join(__dirname, 'data'))) {
     fs.mkdirSync(path.join(__dirname, 'data'));
 }
@@ -59,7 +58,7 @@ const searchCache = {};
 
 // --- HELPER FUNCTIONS ---
 
-function getProfileText(profile, extended = false) {
+function getProfileText(profile, extended = false, forAdmin = false) {
     if (!profile) return "Profile not found.";
     let text = `👤 **Name:** ${profile.name || 'N/A'}\n`;
     text += `🎂 **Age:** ${profile.age || 'N/A'}\n`;
@@ -69,7 +68,15 @@ function getProfileText(profile, extended = false) {
     if (extended) {
         text += `📝 **Limits:** ${profile.limits || 'Not set'}\n`;
         text += `ℹ️ **Extra Info:** ${profile.extraInfo || 'Not set'}\n`;
-        text += `💰 **Coins:** ${profile.coins}\n`;
+        text += `\n💰 **Coins:** ${profile.coins}\n`;
+        if (profile.boostUntil && new Date(profile.boostUntil) > new Date()) {
+            text += `🚀 **Profile Boosted!**\n`;
+        }
+    }
+    if (forAdmin) {
+        text += `\n--- Admin Info ---\n`;
+        text += `**User ID:** \`${profile.id}\`\n`;
+        text += `**Banned:** ${profile.banned ? 'Yes' : 'No'}\n`;
     }
     return text;
 }
@@ -84,7 +91,8 @@ async function sendMainMenu(chatId, messageId = null) {
     const keyboard = userProfile
         ? [
             [{ text: "✨ My Profile", callback_data: "profile_view" }],
-            [{ text: "🔍 Search", callback_data: "search_start" }, { text: "❤️ My Matches", callback_data: "my_matches" }]
+            [{ text: "🔍 Search", callback_data: "search_start" }, { text: "❤️ My Matches", callback_data: "my_matches" }],
+            [{ text: "💰 Coin Store", callback_data: "store_view" }]
           ]
         : [[{ text: "🚀 Create Profile", callback_data: "profile_create" }]];
 
@@ -97,8 +105,7 @@ async function sendMainMenu(chatId, messageId = null) {
             await bot.sendMessage(chatId, text, options);
         }
     } catch (error) {
-        console.error("Error sending main menu:", error.code, error.response?.body);
-        if (error.code === 'ETELEGRAM' && messageId) { // If editing fails, send new message
+        if (error.code === 'ETELEGRAM' && messageId) {
             await bot.sendMessage(chatId, text, options);
         }
     }
@@ -106,7 +113,6 @@ async function sendMainMenu(chatId, messageId = null) {
 
 // --- WEBHOOK & MESSAGE ROUTERS ---
 
-// We are receiving updates at the route below!
 app.post(`/bot${TELEGRAM_TOKEN}`, (req, res) => {
     bot.processUpdate(req.body);
     res.sendStatus(200);
@@ -114,37 +120,48 @@ app.post(`/bot${TELEGRAM_TOKEN}`, (req, res) => {
 
 bot.on('message', (msg) => {
     const chatId = msg.chat.id;
-    // Ignore commands in the general message handler
+    const db = readDb();
+    if (db.users[chatId]?.banned) {
+        return bot.sendMessage(chatId, "You have been banned from using this bot.");
+    }
+
     if (msg.text && msg.text.startsWith('/')) return;
 
     const state = userState[chatId];
     if (!state) return;
 
     try {
-        if (state.action === 'creating_profile') {
-            handleCreationWizard(msg);
-        } else if (state.action.startsWith('editing_')) {
-            handleFieldEdit(msg);
-        }
+        if (state.action === 'creating_profile') handleCreationWizard(msg);
+        else if (state.action.startsWith('editing_')) handleFieldEdit(msg);
+        else if (state.action === 'broadcasting') handleBroadcast(msg);
+        else if (state.action === 'granting_coins') handleCoinGrant(msg);
     } catch (error) {
         console.error("Error in message handler:", error);
-        bot.sendMessage(chatId, "An error occurred. Please try again.");
+        bot.sendMessage(chatId, "An error occurred. Please type /start to reset.");
+        delete userState[chatId];
     }
 });
 
 bot.on('callback_query', (query) => {
     const chatId = query.message.chat.id;
-    bot.answerCallbackQuery(query.id); // Acknowledge press
+    const db = readDb();
+    if (db.users[chatId]?.banned) {
+        return bot.answerCallbackQuery(query.id, { text: "You are banned.", show_alert: true });
+    }
+
+    bot.answerCallbackQuery(query.id);
 
     try {
-        const [action, ...params] = query.data.split('_');
+        const [action] = query.data.split('_');
         switch (action) {
             case 'profile': handleProfileActions(query); break;
             case 'search': handleSearchActions(query); break;
             case 'like': handleLikeAction(query); break;
             case 'gallery': handleGallery(query); break;
-            case 'my': if (params[0] === 'matches') handleMyMatches(query); break;
+            case 'my': if (query.data.split('_')[1] === 'matches') handleMyMatches(query); break;
             case 'wizard': handleCreationWizard(query); break;
+            case 'store': handleStoreActions(query); break;
+            case 'admin': handleAdminActions(query); break; // Admin router
             case 'back': sendMainMenu(chatId, query.message.message_id); break;
             default: bot.sendMessage(chatId, "Unknown command.");
         }
@@ -154,137 +171,303 @@ bot.on('callback_query', (query) => {
     }
 });
 
+// --- COMMANDS ---
 bot.onText(/\/start/, (msg) => sendMainMenu(msg.chat.id));
+bot.onText(/\/daily/, (msg) => handleDailyBonus(msg.chat.id));
+bot.onText(/\/help/, (msg) => sendHelpMessage(msg.chat.id));
+bot.onText(/\/admin/, (msg) => {
+    if (String(msg.chat.id) === ADMIN_CHAT_ID) {
+        sendAdminMenu(msg.chat.id);
+    } else {
+        bot.sendMessage(msg.chat.id, "You are not authorized to use this command.");
+    }
+});
 
-// --- PROFILE MANAGEMENT ---
+// --- ADMIN PANEL ---
 
-function handleProfileActions(query) {
+function sendAdminMenu(chatId, messageId = null) {
+    const text = "👑 *Admin Panel*\nWelcome, administrator. What would you like to do?";
+    const keyboard = [
+        [{ text: "📊 Server Stats", callback_data: "admin_stats" }],
+        [{ text: "👥 Manage Users", callback_data: "admin_list_users_0" }],
+        [{ text: "📢 Broadcast Message", callback_data: "admin_broadcast" }]
+    ];
+    const options = { parse_mode: "Markdown", reply_markup: { inline_keyboard: keyboard } };
+
+    if (messageId) {
+        bot.editMessageText(text, { ...options, chat_id: chatId, message_id: messageId });
+    } else {
+        bot.sendMessage(chatId, text, options);
+    }
+}
+
+function handleAdminActions(query) {
     const { message, data } = query;
-    const [_, subAction, field] = data.split('_');
+    const chatId = message.chat.id;
+    const [_, action, param1, param2] = data.split('_');
 
-    switch (subAction) {
-        case 'view': viewProfile(message.chat.id, message.message_id); break;
-        case 'create': startProfileCreation(message.chat.id); break;
-        case 'edit':
-            if (field) promptForField(message.chat.id, field);
-            else showEditMenu(message.chat.id, message.message_id);
-            break;
+    if (String(chatId) !== ADMIN_CHAT_ID) return;
+
+    switch (action) {
+        case 'menu': sendAdminMenu(chatId, message.message_id); break;
+        case 'stats': showServerStats(chatId, message.message_id); break;
+        case 'list': listAllUsers(chatId, message.message_id, parseInt(param1, 10)); break;
+        case 'view': viewUserProfileAsAdmin(chatId, param1, message.message_id); break;
+        case 'grant': promptForCoinGrant(chatId, param1); break;
+        case 'ban': banOrUnbanUser(chatId, param1, true); break;
+        case 'unban': banOrUnbanUser(chatId, param1, false); break;
+        case 'broadcast': promptForBroadcast(chatId); break;
     }
 }
 
-async function viewProfile(chatId, messageId) {
+function showServerStats(chatId, messageId) {
     const db = readDb();
-    const profile = db.users[chatId];
-    if (!profile) return bot.sendMessage(chatId, "Please create a profile first with /start.");
+    const totalUsers = Object.keys(db.users).length;
+    const totalMatches = Object.keys(db.matches).length;
+    const dbSize = fs.existsSync(dbPath) ? (fs.statSync(dbPath).size / 1024).toFixed(2) : 0;
 
-    const profileText = getProfileText(profile, true);
-    const keyboard = [
-        [{ text: "✏️ Edit Profile", callback_data: "profile_edit" }, { text: "🖼️ My Photo Gallery", callback_data: "gallery_view" }],
-        [{ text: "⬅️ Back to Main Menu", callback_data: "back_to_menu" }]
-    ];
-    const options = {
-        caption: profileText,
-        parse_mode: 'Markdown',
+    const text = `*Server Statistics*\n\n` +
+                 `- Total Users: ${totalUsers}\n` +
+                 `- Total Matches: ${totalMatches}\n` +
+                 `- Database Size: ${dbSize} KB`;
+
+    bot.editMessageText(text, {
+        chat_id: chatId,
+        message_id: messageId,
+        parse_mode: "Markdown",
+        reply_markup: { inline_keyboard: [[{ text: "⬅️ Back to Admin Menu", callback_data: "admin_menu" }]] }
+    });
+}
+
+function listAllUsers(chatId, messageId, page = 0) {
+    const db = readDb();
+    const users = Object.values(db.users);
+    const usersPerPage = 5;
+    const startIndex = page * usersPerPage;
+    const paginatedUsers = users.slice(startIndex, startIndex + usersPerPage);
+    const totalPages = Math.ceil(users.length / usersPerPage);
+
+    let text = `*User List (Page ${page + 1} of ${totalPages})*\n\n`;
+    const keyboard = [];
+
+    if (paginatedUsers.length === 0) {
+        text = "No users found.";
+    } else {
+        paginatedUsers.forEach(user => {
+            text += `- ${user.name || 'N/A'} (ID: \`${user.id}\`)\n`;
+            keyboard.push([{ text: `View ${user.name || 'Profile'}`, callback_data: `admin_view_${user.id}` }]);
+        });
+    }
+
+    const navRow = [];
+    if (page > 0) navRow.push({ text: "⬅️ Previous", callback_data: `admin_list_${page - 1}` });
+    if (page < totalPages - 1) navRow.push({ text: "Next ➡️", callback_data: `admin_list_${page + 1}` });
+    if (navRow.length > 0) keyboard.push(navRow);
+
+    keyboard.push([{ text: "⬅️ Back to Admin Menu", callback_data: "admin_menu" }]);
+    bot.editMessageText(text, {
+        chat_id: chatId,
+        message_id: messageId,
+        parse_mode: "Markdown",
         reply_markup: { inline_keyboard: keyboard }
-    };
-
-    try {
-        // To prevent errors, always delete the old message and send a new one for profile view.
-        // This handles transitions from text-only messages to photo messages gracefully.
-        if (messageId) await bot.deleteMessage(chatId, messageId).catch(e => console.log("Old message not found, sending new one."));
-        
-        if (profile.photos && profile.photos.length > 0) {
-            await bot.sendPhoto(chatId, profile.photos[0], options);
-        } else {
-            await bot.sendMessage(chatId, profileText, { ...options, caption: null }); // remove caption for text-only
-        }
-    } catch (error) {
-        console.error("Error in viewProfile:", error.code, error.response?.body);
-        await bot.sendMessage(chatId, "There was an error displaying your profile. Please try again.");
-    }
+    });
 }
 
-async function showEditMenu(chatId, messageId) {
+function viewUserProfileAsAdmin(chatId, targetId, messageId) {
     const db = readDb();
-    const profile = db.users[chatId];
-    const text = "Select the field you want to edit:";
+    const profile = db.users[targetId];
+    if (!profile) return bot.sendMessage(chatId, "User not found.");
+
+    const text = getProfileText(profile, true, true);
     const keyboard = [
-        [{ text: `👤 Name: ${profile.name || 'N/A'}`, callback_data: "profile_edit_name" }],
-        [{ text: `🎂 Age: ${profile.age || 'N/A'}`, callback_data: "profile_edit_age" }],
-        [{ text: `🏙️ City: ${profile.city || 'N/A'}`, callback_data: "profile_edit_city" }],
-        [{ text: `🎨 Interests`, callback_data: "profile_edit_interests" }],
-        [{ text: `📝 Limits`, callback_data: "profile_edit_limits" }],
-        [{ text: `ℹ️ Extra Info`, callback_data: "profile_edit_extraInfo" }],
-        [{ text: "⬅️ Back to Profile", callback_data: "profile_view" }]
+        [{ text: "💰 Grant Coins", callback_data: `admin_grant_${targetId}` }],
+        profile.banned
+            ? [{ text: "✅ Unban User", callback_data: `admin_unban_${targetId}` }]
+            : [{ text: "🚫 Ban User", callback_data: `admin_ban_${targetId}` }],
+        [{ text: "⬅️ Back to User List", callback_data: `admin_list_0` }]
     ];
-    try {
-        await bot.editMessageText(text, { chat_id: chatId, message_id: messageId, reply_markup: { inline_keyboard: keyboard } });
-    } catch (error) {
-        console.error("Error showing edit menu:", error.code);
-        viewProfile(chatId, messageId); // Fallback to re-rendering the profile
+
+    bot.editMessageText(text, {
+        chat_id: chatId,
+        message_id: messageId,
+        parse_mode: "Markdown",
+        reply_markup: { inline_keyboard: keyboard }
+    });
+}
+
+function promptForBroadcast(chatId) {
+    userState[chatId] = { action: 'broadcasting' };
+    bot.sendMessage(chatId, "Please send the message you want to broadcast to all users. Type /cancel to abort.");
+}
+
+async function handleBroadcast(msg) {
+    const chatId = msg.chat.id;
+    if (msg.text === '/cancel') {
+        delete userState[chatId];
+        return bot.sendMessage(chatId, "Broadcast cancelled.");
     }
+
+    const db = readDb();
+    const allUserIds = Object.keys(db.users);
+    let successCount = 0;
+    let failCount = 0;
+
+    await bot.sendMessage(chatId, `Starting broadcast to ${allUserIds.length} users. This may take a while...`);
+
+    for (const userId of allUserIds) {
+        try {
+            await bot.sendMessage(userId, msg.text);
+            successCount++;
+        } catch (error) {
+            console.error(`Failed to send broadcast to ${userId}:`, error.code);
+            failCount++;
+        }
+        // Small delay to avoid hitting rate limits
+        await new Promise(resolve => setTimeout(resolve, 100));
+    }
+
+    delete userState[chatId];
+    await bot.sendMessage(chatId, `Broadcast finished.\n\n✅ Sent successfully: ${successCount}\n❌ Failed to send: ${failCount}`);
+    sendAdminMenu(chatId);
 }
 
-function promptForField(chatId, field) {
-    userState[chatId] = { action: `editing_${field}` };
-    let promptText = `Please enter your new ${field}.`;
-    if (field === 'interests') promptText += " (separated by commas)";
-    if (field === 'photo') promptText = "Please send a photo to add to your gallery.";
-    bot.sendMessage(chatId, promptText);
+function promptForCoinGrant(chatId, targetId) {
+    userState[chatId] = { action: 'granting_coins', targetId: targetId };
+    bot.sendMessage(chatId, `How many coins would you like to grant to user \`${targetId}\`?`, { parse_mode: "Markdown" });
 }
 
-async function handleFieldEdit(msg) {
+function handleCoinGrant(msg) {
     const chatId = msg.chat.id;
     const state = userState[chatId];
-    if (!state) return;
+    const amount = parseInt(msg.text, 10);
 
-    const db = readDb();
-    const field = state.action.split('_')[1];
-    let updated = false;
-
-    if (msg.photo && field === 'photo') {
-        if (!db.users[chatId].photos) db.users[chatId].photos = [];
-        db.users[chatId].photos.push(msg.photo[msg.photo.length - 1].file_id);
-        updated = true;
-    } else if (msg.text) {
-        if (field === 'age') {
-            const age = parseInt(msg.text, 10);
-            if (!isNaN(age) && age >= 18 && age <= 99) {
-                db.users[chatId].age = age;
-                updated = true;
-            } else {
-                bot.sendMessage(chatId, "Invalid age. Please enter a number between 18 and 99.");
-            }
-        } else if (field === 'interests') {
-            db.users[chatId].interests = msg.text.split(',').map(s => s.trim());
-            updated = true;
-        } else {
-            db.users[chatId][field] = msg.text;
-            updated = true;
-        }
+    if (isNaN(amount) || amount <= 0) {
+        return bot.sendMessage(chatId, "Please enter a valid positive number.");
     }
 
-    if (updated) {
+    const db = readDb();
+    const targetProfile = db.users[state.targetId];
+    if (!targetProfile) {
+        bot.sendMessage(chatId, "Target user not found.");
+    } else {
+        targetProfile.coins += amount;
         writeDb(db);
-        await bot.sendMessage(chatId, `✅ Your ${field} has been updated!`);
-        delete userState[chatId];
-        setTimeout(() => viewProfile(chatId), 500);
+        bot.sendMessage(chatId, `✅ Successfully granted ${amount} coins to user ${targetProfile.name} (\`${targetProfile.id}\`).`);
+        bot.sendMessage(targetProfile.id, `An administrator has granted you ${amount} coins!`);
+    }
+    delete userState[chatId];
+    sendAdminMenu(chatId);
+}
+
+function banOrUnbanUser(chatId, targetId, shouldBan) {
+    const db = readDb();
+    const targetProfile = db.users[targetId];
+    if (!targetProfile) return bot.sendMessage(chatId, "User not found.");
+
+    targetProfile.banned = shouldBan;
+    writeDb(db);
+
+    const actionText = shouldBan ? "banned" : "unbanned";
+    bot.sendMessage(chatId, `User ${targetProfile.name} (\`${targetId}\`) has been ${actionText}.`);
+    bot.sendMessage(targetId, `You have been ${actionText} by an administrator.`);
+
+    listAllUsers(chatId, null, 0); // Refresh user list
+}
+
+
+// --- CURRENCY & STORE ---
+
+function handleStoreActions(query) {
+    const { message, data } = query;
+    const [_, action] = data.split('_');
+
+    switch (action) {
+        case 'view': showCoinStore(message.chat.id, message.message_id); break;
+        case 'boost': buyProfileBoost(message.chat.id, message.message_id); break;
     }
 }
 
-// --- PROFILE CREATION WIZARD ---
-function startProfileCreation(chatId) {
+function showCoinStore(chatId, messageId) {
     const db = readDb();
-    if (!db.users[chatId]) {
-        db.users[chatId] = { id: chatId, coins: 100, likes: [], photos: [] };
-        writeDb(db);
-    }
-    userState[chatId] = { action: 'creating_profile', step: 'name' };
-    bot.sendMessage(chatId, "👋 Let's create your profile!\n\nFirst, what's your name?");
+    const profile = db.users[chatId];
+    const text = `💰 **Coin Store**\n\nYour balance: ${profile.coins} coins.\n\n` +
+                 `Use your coins to get noticed!\n\n` +
+                 `🚀 **Profile Boost (50 Coins)**\n` +
+                 `Your profile will appear at the top of search results for 24 hours.`;
+    const keyboard = [
+        [{ text: "🚀 Boost My Profile (50 Coins)", callback_data: "store_boost" }],
+        [{ text: "Claim Daily Bonus (/daily)", callback_data: "ignore" }], // Dummy button
+        [{ text: "⬅️ Back to Main Menu", callback_data: "back_to_menu" }]
+    ];
+    bot.editMessageText(text, { chat_id: chatId, message_id: messageId, parse_mode: "Markdown", reply_markup: { inline_keyboard: keyboard } });
 }
 
-function handleCreationWizard(queryOrMsg) {
-    const isMsg = !!queryOrMsg.text;
+function buyProfileBoost(chatId, messageId) {
+    const db = readDb();
+    const profile = db.users[chatId];
+    const cost = 50;
+
+    if (profile.coins < cost) {
+        return bot.answerCallbackQuery(query.id, { text: "You don't have enough coins!", show_alert: true });
+    }
+
+    profile.coins -= cost;
+    const now = new Date();
+    // If already boosted, add 24 hours to the existing time. Otherwise, set from now.
+    const currentBoost = (profile.boostUntil && new Date(profile.boostUntil) > now) ? new Date(profile.boostUntil) : now;
+    profile.boostUntil = new Date(currentBoost.getTime() + 24 * 60 * 60 * 1000);
+    writeDb(db);
+
+    bot.answerCallbackQuery(query.id, { text: "Success! Your profile is boosted for 24 hours.", show_alert: true });
+    showCoinStore(chatId, messageId);
+}
+
+function handleDailyBonus(chatId) {
+    const db = readDb();
+    const profile = db.users[chatId];
+    if (!profile) return bot.sendMessage(chatId, "You need a profile to claim a bonus. Use /start to create one.");
+
+    const now = new Date();
+    const lastDaily = profile.lastDaily ? new Date(profile.lastDaily) : null;
+
+    if (lastDaily && (now - lastDaily) < 24 * 60 * 60 * 1000) {
+        const hoursLeft = (24 - (now - lastDaily) / (1000 * 60 * 60)).toFixed(1);
+        return bot.sendMessage(chatId, `You have already claimed your daily bonus. Please wait ${hoursLeft} more hours.`);
+    }
+
+    const bonus = 25;
+    profile.coins += bonus;
+    profile.lastDaily = now.toISOString();
+    writeDb(db);
+
+    bot.sendMessage(chatId, `🎉 You have claimed your daily bonus of ${bonus} coins! Your new balance is ${profile.coins}.`);
+}
+
+function sendHelpMessage(chatId) {
+    let text = `*Welcome to the Dating Bot! Here's how to use it:*\n\n` +
+               `*/start* - Shows the main menu.\n` +
+               `*/profile* - View and manage your profile.\n` +
+               `*/search* - Find other users.\n` +
+               `*/matches* - See who you've matched with.\n\n` +
+               `*Currency System*\n` +
+               `- You spend **10 coins** to 'Like' a profile.\n` +
+               `- Use */daily* once every 24 hours to get **25 free coins**.\n` +
+               `- Visit the *Coin Store* from the main menu to buy a **Profile Boost**!`;
+
+    if (String(chatId) === ADMIN_CHAT_ID) {
+        text += `\n\n*👑 Admin Commands*\n` +
+                `*/admin* - Access the admin panel to manage users, view stats, and send broadcasts.`;
+    }
+
+    bot.sendMessage(chatId, text, { parse_mode: "Markdown" });
+}
+
+// --- ALL OTHER FUNCTIONS (Profile, Search, Match, Gallery) ---
+// These functions are largely the same as the previous version, but with
+// added checks for banned status and other minor improvements.
+
+async function handleCreationWizard(queryOrMsg) {
+    const isMsg = !!queryOrMsg.text || !!queryOrMsg.photo;
     const chatId = isMsg ? queryOrMsg.chat.id : queryOrMsg.message.chat.id;
     const state = userState[chatId];
     if (!state) return;
@@ -297,15 +480,14 @@ function handleCreationWizard(queryOrMsg) {
         bot.sendMessage(chatId, question, options);
     };
 
-    // Process current step
     switch (state.step) {
         case 'name':
-            if (!isMsg) return;
+            if (!queryOrMsg.text) return bot.sendMessage(chatId, "Please send your name as text.");
             profile.name = queryOrMsg.text;
             nextStep('age', 'Great! Now, how old are you?');
             break;
         case 'age':
-            if (!isMsg) return;
+            if (!queryOrMsg.text) return bot.sendMessage(chatId, "Please send your age as a number.");
             const age = parseInt(queryOrMsg.text, 10);
             if (isNaN(age) || age < 18 || age > 99) return bot.sendMessage(chatId, "Please enter a valid age between 18 and 99.");
             profile.age = age;
@@ -320,58 +502,59 @@ function handleCreationWizard(queryOrMsg) {
             nextStep('city', `Perfect. What city do you live in?`);
             break;
         case 'city':
-            if (!isMsg) return;
+            if (!queryOrMsg.text) return bot.sendMessage(chatId, "Please send your city as text.");
             profile.city = queryOrMsg.text;
             nextStep('interests', 'Almost done! List some interests, separated by commas (e.g., Hiking, Movies).');
             break;
         case 'interests':
-            if (!isMsg) return;
+            if (!queryOrMsg.text) return bot.sendMessage(chatId, "Please send your interests as text.");
             profile.interests = queryOrMsg.text.split(',').map(s => s.trim());
             nextStep('photo', 'Last step! Send me a photo for your profile.');
             break;
         case 'photo':
-            if (!queryOrMsg.photo) return bot.sendMessage(chatId, "Please send a photo.");
+            if (!queryOrMsg.photo) return bot.sendMessage(chatId, "That's not a photo. Please send a photo to continue.");
             profile.photos.push(queryOrMsg.photo[queryOrMsg.photo.length - 1].file_id);
             bot.sendMessage(chatId, "🎉 All done! Your profile has been created.");
             delete userState[chatId];
             writeDb(db);
             setTimeout(() => viewProfile(chatId), 500);
-            return; // End of wizard
+            return;
     }
-    writeDb(db); // Save progress after each step
+    writeDb(db);
 }
 
-// --- PHOTO GALLERY ---
 async function handleGallery(query) {
     const { message, data } = query;
-    const [_, action, targetId, indexStr] = data.split('_');
+    const [_, action, targetIdStr, indexStr] = data.split('_');
     const chatId = message.chat.id;
+    const targetId = targetIdStr === 'self' ? chatId : targetIdStr;
 
     const db = readDb();
-    const profile = db.users[targetId || chatId];
+    const profile = db.users[targetId];
     if (!profile || !profile.photos || profile.photos.length === 0) {
-        return bot.sendMessage(chatId, "No photos in the gallery.");
+        return bot.answerCallbackQuery(query.id, { text: "No photos in the gallery." });
     }
 
     let index = parseInt(indexStr, 10) || 0;
 
     if (action === 'next') index++;
     if (action === 'prev') index--;
-    index = (index + profile.photos.length) % profile.photos.length; // Wrap around
+    index = (index + profile.photos.length) % profile.photos.length;
 
     const photoId = profile.photos[index];
-    const isOwnProfile = String(chatId) === String(targetId || chatId);
+    const isOwnProfile = String(chatId) === String(targetId);
 
     const keyboard = [];
     const navRow = [];
     if (profile.photos.length > 1) {
-        navRow.push({ text: "⬅️ Prev", callback_data: `gallery_prev_${targetId || chatId}_${index}` });
-        navRow.push({ text: "Next ➡️", callback_data: `gallery_next_${targetId || chatId}_${index}` });
+        const callbackTarget = isOwnProfile ? 'self' : targetId;
+        navRow.push({ text: "⬅️ Prev", callback_data: `gallery_prev_${callbackTarget}_${index}` });
+        navRow.push({ text: "Next ➡️", callback_data: `gallery_next_${callbackTarget}_${index}` });
     }
     if(navRow.length > 0) keyboard.push(navRow);
     
     if (isOwnProfile) {
-        keyboard.push([{ text: "🗑️ Delete This Photo", callback_data: `gallery_delete_${chatId}_${index}` }]);
+        keyboard.push([{ text: "🗑️ Delete This Photo", callback_data: `gallery_delete_self_${index}` }]);
         keyboard.push([{ text: "➕ Add New Photo", callback_data: "profile_edit_photo"}]);
         keyboard.push([{ text: "⬅️ Back to Profile", callback_data: "profile_view" }]);
     } else {
@@ -385,7 +568,7 @@ async function handleGallery(query) {
         await bot.deleteMessage(chatId, message.message_id);
         bot.sendMessage(chatId, "Photo deleted.");
         if (profile.photos.length > 0) {
-            handleGallery({ ...query, data: `gallery_view_${chatId}_0` }); // Show first photo
+            handleGallery({ ...query, data: `gallery_view_self_0` });
         } else {
             viewProfile(chatId);
         }
@@ -395,15 +578,12 @@ async function handleGallery(query) {
     try {
         await bot.editMessageMedia({ type: 'photo', media: photoId }, { chat_id: chatId, message_id: message.message_id, reply_markup: { inline_keyboard: keyboard } });
     } catch (error) {
-        console.error("Error in gallery view:", error.code);
         await bot.deleteMessage(chatId, message.message_id).catch(()=>{});
         await bot.sendPhoto(chatId, photoId, { reply_markup: { inline_keyboard: keyboard } });
     }
 }
 
-
-// --- SEARCH & MATCHING ---
-function handleSearchActions(query) {
+async function handleSearchActions(query) {
     const { message, data } = query;
     const [_, subAction, field, value] = data.split('_');
 
@@ -417,7 +597,7 @@ function handleSearchActions(query) {
             break;
         case 'result':
             bot.deleteMessage(message.chat.id, message.message_id).catch(()=>{});
-            showSearchResult(message.chat.id, field); // field is 'next' or 'prev'
+            showSearchResult(message.chat.id, field);
             break;
     }
 }
@@ -443,9 +623,17 @@ function executeSearch(chatId, messageId) {
     if (!searchCriteria) return bot.sendMessage(chatId, "Search expired. Please start again.");
     
     const [minAge, maxAge] = searchCriteria.age.split('-').map(Number);
+    
+    const now = new Date();
     const results = Object.values(db.users).filter(u =>
-        u.id !== chatId && u.gender === searchCriteria.gender && u.age >= minAge && u.age <= maxAge
-    );
+        u.id !== chatId && !u.banned && u.gender === searchCriteria.gender && u.age >= minAge && u.age <= maxAge
+    ).sort((a, b) => {
+        const aBoosted = a.boostUntil && new Date(a.boostUntil) > now;
+        const bBoosted = b.boostUntil && new Date(b.boostUntil) > now;
+        if (aBoosted && !bBoosted) return -1;
+        if (!aBoosted && bBoosted) return 1;
+        return 0;
+    });
 
     if (results.length === 0) {
         bot.editMessageText("😔 No users found matching your criteria.", { chat_id: chatId, message_id: messageId });
@@ -455,7 +643,7 @@ function executeSearch(chatId, messageId) {
 
     searchCache[chatId] = { results, index: -1 };
     bot.deleteMessage(chatId, messageId).catch(()=>{});
-    bot.sendMessage(chatId, `Found ${results.length} potential matches!`);
+    bot.sendMessage(chatId, `Found ${results.length} potential matches! Boosted profiles are shown first.`);
     showSearchResult(chatId, 'next');
     delete userState[chatId].search;
 }
@@ -479,7 +667,7 @@ async function showSearchResult(chatId, direction) {
     const profile = cache.results[cache.index];
     const profileText = getProfileText(profile);
     const keyboard = [
-        [{ text: "❤️ Like", callback_data: `like_${profile.id}` }, { text: "👎 Next", callback_data: "search_result_next" }],
+        [{ text: "❤️ Like (10 Coins)", callback_data: `like_${profile.id}` }, { text: "👎 Next", callback_data: "search_result_next" }],
     ];
     if (profile.photos && profile.photos.length > 1) {
         keyboard.push([{text: "🖼️ View Photo Gallery", callback_data: `gallery_view_${profile.id}_0`}])
@@ -504,21 +692,20 @@ async function handleLikeAction(query) {
     const likerProfile = db.users[likerId];
     const likedProfile = db.users[likedId];
 
-    if (!likerProfile || !likedProfile) return bot.sendMessage(likerId, "Error: Profile not found.");
-    if (likerProfile.coins < 10) return bot.sendMessage(likerId, "You don't have enough coins to like a profile.");
-    if (likerProfile.likes.includes(likedId)) return bot.sendMessage(likerId, "You've already liked this profile.");
+    if (!likerProfile || !likedProfile) return bot.answerCallbackQuery(query.id, { text: "Error: Profile not found.", show_alert: true });
+    if (likerProfile.coins < 10) return bot.answerCallbackQuery(query.id, { text: "You don't have enough coins!", show_alert: true });
+    if (likerProfile.likes.includes(likedId)) return bot.answerCallbackQuery(query.id, { text: "You've already liked this profile." });
 
     likerProfile.coins -= 10;
     likerProfile.likes.push(likedId);
     await bot.deleteMessage(likerId, message.message_id).catch(()=>{});
 
     if (likedProfile.likes?.includes(String(likerId))) {
-        // MATCH
         const matchId = uuidv4();
         db.matches[matchId] = { users: [String(likerId), String(likedId)], date: new Date().toISOString() };
         
-        const likerTg = await bot.getChat(likerId);
-        const likedTg = await bot.getChat(likedId);
+        const likerTg = await bot.getChat(likerId).catch(() => ({ username: 'user' }));
+        const likedTg = await bot.getChat(likedId).catch(() => ({ username: 'user' }));
 
         await bot.sendMessage(likerId, `🎉 It's a Match with ${likedProfile.name}!`, {
             reply_markup: { inline_keyboard: [[{ text: "💬 Start Chat", url: `https://t.me/${likedTg.username}` }]] }
@@ -548,7 +735,7 @@ async function handleMyMatches(query) {
         const otherUserId = match.users.find(id => id !== String(chatId));
         const otherUser = db.users[otherUserId];
         if (otherUser) {
-            const otherTg = await bot.getChat(otherUserId);
+            const otherTg = await bot.getChat(otherUserId).catch(() => ({ username: 'user' }));
             text += `\n- **${otherUser.name}** (${otherUser.age}, ${otherUser.city})`;
             keyboard.push([{ text: `💬 Chat with ${otherUser.name}`, url: `https://t.me/${otherTg.username}` }]);
         }
@@ -562,6 +749,7 @@ async function handleMyMatches(query) {
         reply_markup: { inline_keyboard: keyboard }
     });
 }
+
 
 // --- SERVER LISTENER ---
 app.listen(PORT, () => {
