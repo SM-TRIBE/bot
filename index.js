@@ -624,6 +624,9 @@ function handleSubAdminPromotion(queryOrMsg, action) {
 function showCoinStore(chatId) {
     const db = readDb();
     const profile = db.users[chatId];
+    if (!profile) {
+        return bot.sendMessage(chatId, "Please create a profile first.").catch(console.error);
+    }
     const text = `💰 **Coin Store**\n\nYour balance: ${profile.coins} coins.\n\n` +
                  `Use your coins to get noticed!\n\n` +
                  `🚀 **Profile Boost (50 Coins)**\n` +
