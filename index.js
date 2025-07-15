@@ -17,12 +17,12 @@ if (!TELEGRAM_TOKEN || !RENDER_URL || !ADMIN_CHAT_ID) {
     process.exit(1);
 }
 
-// Initialize the bot. The library will handle webhook routing automatically.
 const bot = new TelegramBot(TELEGRAM_TOKEN);
 bot.setWebHook(`${RENDER_URL}/bot${TELEGRAM_TOKEN}`);
 
 const app = express();
-// We don't need express.json() because the library handles the raw stream.
+// **FIX:** Re-added express.json() to parse incoming webhook data from Telegram.
+app.use(express.json());
 
 // --- DATABASE SETUP ---
 const dbPath = path.join(__dirname, 'data', 'db.json');
@@ -114,8 +114,13 @@ async function sendMainMenu(chatId, messageId = null) {
 
 // --- WEBHOOK & MESSAGE ROUTERS ---
 
-// The node-telegram-bot-api library listens for the webhook route for us.
-// We just need a basic server to be running for Render.
+// **FIX:** This POST route is essential for receiving updates from Telegram.
+app.post(`/bot${TELEGRAM_TOKEN}`, (req, res) => {
+    bot.processUpdate(req.body);
+    res.sendStatus(200); // Acknowledge receipt to Telegram
+});
+
+// A simple GET route for health checks on Render
 app.get('/', (req, res) => {
     res.send('Telegram Dating Bot is running!');
 });
