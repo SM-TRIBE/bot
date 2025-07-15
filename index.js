@@ -1,4 +1,4 @@
-// Main bot file for Telegram: index.js (Keyboard Buttons & Referral System Update)
+// Main bot file for Telegram: index.js (Fully Functional Version)
 
 const TelegramBot = require('node-telegram-bot-api');
 const express = require('express');
@@ -60,6 +60,7 @@ function writeDb(data) {
 
 // In-memory state and cache
 const userState = {};
+const searchCache = {};
 let BOT_USERNAME = '';
 bot.getMe().then(me => {
     BOT_USERNAME = me.username;
@@ -162,7 +163,6 @@ bot.on('message', (msg) => {
     
     const state = userState[chatId];
     if (state) {
-        // Handle state-based inputs
         if (state.action === 'creating_profile') return handleCreationWizard(msg);
         if (state.action === 'editing_field') return handleFieldEdit(msg);
         if (state.action === 'granting_coins_id') return handleCoinGrant(msg, 'amount');
@@ -170,17 +170,23 @@ bot.on('message', (msg) => {
         if (state.action === 'managing_users') return handleUserManagement(msg);
         if (state.action === 'managing_sub_admins_promote') return handleSubAdminPromotion(msg, 'promote');
         if (state.action === 'managing_sub_admins_demote') return handleSubAdminPromotion(msg, 'demote');
+        if (state.action === 'searching_interests') {
+             const searchState = userState[chatId]?.search;
+             if (searchState) {
+                searchState.interests = text;
+                executeSearch(chatId, state.messageId);
+             }
+        }
         return;
     }
 
-    if (!text) return; // Ignore non-text messages if not in a state
+    if (!text) return;
 
-    // Handle keyboard button presses
     switch (text) {
         case '✨ My Profile': viewProfile(chatId); break;
-        case '🔍 Search': bot.sendMessage(chatId, "This feature is coming soon!"); break;
-        case '❤️ My Matches': bot.sendMessage(chatId, "This feature is coming soon!"); break;
-        case '💰 Coin Store': bot.sendMessage(chatId, "This feature is coming soon!"); break;
+        case '🔍 Search': startSearch(chatId); break;
+        case '❤️ My Matches': handleMyMatches(chatId); break;
+        case '💰 Coin Store': showCoinStore(chatId); break;
         case '📢 Get Referral Link': sendReferralLink(chatId); break;
         case '🚀 Create Profile': startProfileCreation(chatId); break;
         case '👑 Admin Panel':
@@ -194,41 +200,53 @@ bot.on('message', (msg) => {
             }
             break;
         case '⬅️ Back to Main Menu': sendMainMenu(chatId); break;
-        // Admin panel buttons
         case '📊 Server Stats': showServerStats(chatId); break;
-        case '👥 Manage Users': promptForUserId(chatId, 'view_manage'); break;
-        case '🚨 Manage Reports': bot.sendMessage(chatId, "Report management is coming soon!"); break;
+        case '👥 Manage Users': listAllUsers(chatId, null, 0); break;
+        case '🚨 Manage Reports': listOpenReports(chatId, null, 0); break;
         case '🛡️ Manage Sub-Admins': manageSubAdmins(chatId); break;
         case '💰 Grant Coins': promptForCoinGrant(chatId); break;
-        case '📢 Broadcast': bot.sendMessage(chatId, "Broadcast feature is coming soon!"); break;
-        // Sub-admin panel buttons
-        case '👥 View Users': promptForUserId(chatId, 'view_only'); break;
+        case '📢 Broadcast': promptForBroadcast(chatId); break;
+        case '👥 View Users': listAllUsers(chatId, null, 0, true); break; // Sub-admin view
     }
 });
 
 bot.on('callback_query', (query) => {
     const { message, data } = query;
     const chatId = message.chat.id;
+    bot.answerCallbackQuery(query.id).catch(console.error);
 
-    if (data.startsWith('admin_promote_sub')) return handleSubAdminPromotion(query, 'promote_prompt');
-    if (data.startsWith('admin_demote_sub')) return handleSubAdminPromotion(query, 'demote_prompt');
-    
-    // --- FIX: Profile Editing Logic ---
-    if (data === 'profile_edit') {
-        return showEditMenu(chatId, message.message_id);
-    }
-    if (data.startsWith('edit_field_')) {
-        const field = data.split('_')[2];
-        return promptForField(chatId, field);
-    }
-    if (data === 'profile_view_back') {
-        bot.deleteMessage(chatId, message.message_id).catch(console.error);
-        return viewProfile(chatId);
-    }
-    // --- END FIX ---
+    try {
+        const [action, p1, p2, p3] = data.split('_');
 
-    if (data.startsWith('viewers_show')) return bot.sendMessage(chatId, "Viewing who saw your profile is coming soon!");
-
+        switch (action) {
+            case 'admin': handleAdminActions(query); break;
+            case 'profile':
+                if (p1 === 'edit') showEditMenu(chatId, message.message_id);
+                if (p1 === 'view' && p2 === 'back') {
+                    bot.deleteMessage(chatId, message.message_id).catch(console.error);
+                    viewProfile(chatId);
+                }
+                break;
+            case 'edit':
+                if (p1 === 'field') promptForField(chatId, p2, message.message_id);
+                break;
+            case 'viewers': handleProfileViewers(query); break;
+            case 'like': handleLikeAction(query); break;
+            case 'search':
+                if(p1 === 'criteria') handleSearchActions(query);
+                if(p1 === 'result') {
+                    bot.deleteMessage(chatId, message.message_id).catch(()=>{});
+                    showSearchResult(chatId, p2);
+                }
+                break;
+            case 'report':
+                if(p1 === 'prompt') promptForReportReason(chatId, p2);
+                break;
+        }
+    } catch (error) {
+        console.error("Error in callback query handler:", error);
+        bot.sendMessage(chatId, "An error occurred. Please try again.").catch(console.error);
+    }
 });
 
 // --- COMMANDS ---
@@ -378,13 +396,15 @@ async function showEditMenu(chatId, messageId) {
     }
 }
 
-function promptForField(chatId, field) {
+function promptForField(chatId, field, messageId) {
     userState[chatId] = { action: 'editing_field', field: field };
     let promptText = `Please send the new value for your *${field}*.`;
     if (field === 'interests') {
         promptText += "\n(Please separate multiple interests with a comma)";
     }
-    bot.sendMessage(chatId, promptText, { parse_mode: "Markdown" }).catch(console.error);
+    bot.editMessageText(promptText, { chat_id: chatId, message_id: messageId, parse_mode: "Markdown" }).catch(e => {
+        bot.sendMessage(chatId, promptText, { parse_mode: "Markdown" }).catch(console.error);
+    });
 }
 
 function handleFieldEdit(msg) {
@@ -589,7 +609,6 @@ function handleSubAdminPromotion(queryOrMsg, action) {
     }
     delete userState[adminId];
 }
-
 
 // --- SERVER LISTENER ---
 app.listen(PORT, () => {
