@@ -1,4 +1,4 @@
-// Main bot file for Telegram: index.js (Fully Debugged & Stable Version)
+// Main bot file for Telegram: index.js (Definitive Stable Version)
 
 const TelegramBot = require('node-telegram-bot-api');
 const express = require('express');
@@ -710,7 +710,7 @@ function startSearch(chatId) {
     const keyboard = {
         inline_keyboard: [
             [{ text: "By Gender & Age", callback_data: "search_criteria_gender" }],
-            [{ text: "By Interests", callback_data: "search_criteria_interests" }]
+            [{ text: "By Interests", callback_data: "search_criteria_interests_prompt" }]
         ]
     };
     bot.sendMessage(chatId, "How would you like to search?", { reply_markup: keyboard });
@@ -730,12 +730,10 @@ async function handleSearchActions(query) {
         userState[chatId].search.age = value;
         await executeSearch(chatId, message.message_id);
     } else if (field === 'interests') {
-        if(value === 'yes') {
+        if(value === 'prompt') {
             userState[chatId].action = 'searching_interests';
             userState[chatId].messageId = message.message_id;
             await bot.editMessageText("Please type the interests you're looking for, separated by commas.", { chat_id: chatId, message_id: message.message_id });
-        } else {
-            await executeSearch(chatId, message.message_id);
         }
     }
 }
@@ -758,7 +756,89 @@ async function promptSearchCriteria(chatId, criteria, messageId) {
     await bot.editMessageText(text, { chat_id: chatId, message_id: messageId, reply_markup: keyboard }).catch(console.error);
 }
 
-// ... (Rest of the functions are unchanged and complete)
+function executeSearch(chatId, messageId) {
+    const db = readDb();
+    const searchCriteria = userState[chatId]?.search;
+    if (!searchCriteria) return bot.sendMessage(chatId, "Search expired. Please start again.").catch(console.error);
+    
+    const [minAge, maxAge] = searchCriteria.age ? searchCriteria.age.split('-').map(Number) : [0, 99];
+    const searchInterests = searchCriteria.interests ? searchCriteria.interests.split(',').map(i => i.trim().toLowerCase()) : [];
+    
+    const now = new Date();
+    const results = Object.values(db.users).filter(u => {
+        if (String(u.id) === String(chatId) || u.banned) return false;
+        if (searchCriteria.gender && u.gender !== searchCriteria.gender) return false;
+        if (searchCriteria.age && (u.age < minAge || u.age > maxAge)) return false;
+        if (searchInterests.length > 0) {
+            const userInterests = (u.interests || []).map(i => i.toLowerCase());
+            const hasInterest = searchInterests.some(si => userInterests.includes(si));
+            if (!hasInterest) return false;
+        }
+        return true;
+    }).sort((a, b) => {
+        const aBoosted = a.boostUntil && new Date(a.boostUntil) > now;
+        const bBoosted = b.boostUntil && new Date(b.boostUntil) > now;
+        if (aBoosted && !bBoosted) return -1;
+        if (!aBoosted && bBoosted) return 1;
+        return 0;
+    });
+
+    if (results.length === 0) {
+        bot.editMessageText("😔 No users found matching your criteria.", { chat_id: chatId, message_id: messageId }).catch(console.error);
+        delete userState[chatId];
+        return;
+    }
+
+    searchCache[chatId] = { results, index: -1 };
+    bot.deleteMessage(chatId, messageId).catch(()=>{});
+    bot.sendMessage(chatId, `Found ${results.length} potential matches! Boosted profiles are shown first.`).catch(console.error);
+    showSearchResult(chatId, 'next');
+    delete userState[chatId];
+}
+
+async function showSearchResult(chatId, direction) {
+    const cache = searchCache[chatId];
+    if (!cache || cache.results.length === 0) return bot.sendMessage(chatId, "Search session expired or no results found.").catch(console.error);
+
+    if (direction === 'next') cache.index++;
+    if (direction === 'prev') cache.index--;
+
+    if (cache.index >= cache.results.length) {
+        cache.index = cache.results.length - 1;
+        return bot.sendMessage(chatId, "You've reached the end of the search results.").catch(console.error);
+    }
+    if (cache.index < 0) {
+        cache.index = 0;
+        return bot.sendMessage(chatId, "You're at the beginning of the search results.").catch(console.error);
+    }
+
+    const profile = cache.results[cache.index];
+    
+    const db = readDb();
+    const targetProfile = db.users[profile.id];
+    if (targetProfile) {
+        if (!targetProfile.viewers) targetProfile.viewers = [];
+        if (!targetProfile.viewers.find(v => v.id === chatId)) {
+            targetProfile.viewers.push({ id: chatId, date: new Date().toISOString() });
+            targetProfile.viewers = targetProfile.viewers.slice(-20);
+            writeDb(db);
+        }
+    }
+
+    const profileText = getProfileText(profile);
+    const keyboard = {
+        inline_keyboard: [
+            [{ text: "❤️ Like (10 Coins)", callback_data: `like_${profile.id}` }, { text: "👎 Next", callback_data: "search_result_next" }],
+            [{ text: `🚩 Report ${profile.name}`, callback_data: `report_prompt_${profile.id}` }]
+        ]
+    };
+    
+    try {
+        await bot.sendMessage(chatId, profileText, { parse_mode: "Markdown", reply_markup: keyboard });
+    } catch (error) {
+        console.error("Error showing search result:", error.code);
+    }
+}
 
 // --- SERVER LISTENER ---
 app.listen(PORT, () => {
