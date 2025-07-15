@@ -1,0 +1,17 @@
+{
+  "name": "telegram-dating-bot-render",
+  "version": "3.0.0",
+  "description": "An advanced dating bot for Telegram, optimized for Render deployment.",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "node-telegram-bot-api": "^0.66.0",
+    "uuid": "^9.0.1"
+  },
+  "engines": {
+    "node": "18.x"
+  }
+}
