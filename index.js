@@ -164,6 +164,7 @@ bot.on('message', (msg) => {
     if (state) {
         // Handle state-based inputs
         if (state.action === 'creating_profile') return handleCreationWizard(msg);
+        if (state.action === 'editing_field') return handleFieldEdit(msg);
         if (state.action === 'granting_coins_id') return handleCoinGrant(msg, 'amount');
         if (state.action === 'granting_coins_amount') return handleCoinGrant(msg, 'confirm');
         if (state.action === 'managing_users') return handleUserManagement(msg);
@@ -211,7 +212,21 @@ bot.on('callback_query', (query) => {
 
     if (data.startsWith('admin_promote_sub')) return handleSubAdminPromotion(query, 'promote_prompt');
     if (data.startsWith('admin_demote_sub')) return handleSubAdminPromotion(query, 'demote_prompt');
-    if (data.startsWith('profile_edit')) return bot.sendMessage(chatId, "Profile editing is coming soon!");
+    
+    // --- FIX: Profile Editing Logic ---
+    if (data === 'profile_edit') {
+        return showEditMenu(chatId, message.message_id);
+    }
+    if (data.startsWith('edit_field_')) {
+        const field = data.split('_')[2];
+        return promptForField(chatId, field);
+    }
+    if (data === 'profile_view_back') {
+        bot.deleteMessage(chatId, message.message_id).catch(console.error);
+        return viewProfile(chatId);
+    }
+    // --- END FIX ---
+
     if (data.startsWith('viewers_show')) return bot.sendMessage(chatId, "Viewing who saw your profile is coming soon!");
 
 });
@@ -330,7 +345,7 @@ function handleCreationWizard(msg) {
     writeDb(db);
 }
 
-// --- PROFILE VIEW ---
+// --- PROFILE VIEW & EDIT ---
 async function viewProfile(chatId) {
     const db = readDb();
     const profile = db.users[chatId];
@@ -344,6 +359,61 @@ async function viewProfile(chatId) {
         ]
     };
     await bot.sendMessage(chatId, profileText, { parse_mode: 'Markdown', reply_markup: keyboard }).catch(console.error);
+}
+
+async function showEditMenu(chatId, messageId) {
+    const text = "What would you like to edit? Select a field below.";
+    const keyboard = {
+        inline_keyboard: [
+            [{ text: "👤 Name", callback_data: "edit_field_name" }, { text: "🎂 Age", callback_data: "edit_field_age" }],
+            [{ text: "⚧️ Gender", callback_data: "edit_field_gender" }, { text: "🏙️ City", callback_data: "edit_field_city" }],
+            [{ text: "🎨 Interests", callback_data: "edit_field_interests" }],
+            [{ text: "⬅️ Back to Profile", callback_data: "profile_view_back" }]
+        ]
+    };
+    try {
+        await bot.editMessageText(text, { chat_id: chatId, message_id: messageId, reply_markup: keyboard });
+    } catch (e) {
+        await bot.sendMessage(chatId, text, { reply_markup: keyboard }).catch(console.error);
+    }
+}
+
+function promptForField(chatId, field) {
+    userState[chatId] = { action: 'editing_field', field: field };
+    let promptText = `Please send the new value for your *${field}*.`;
+    if (field === 'interests') {
+        promptText += "\n(Please separate multiple interests with a comma)";
+    }
+    bot.sendMessage(chatId, promptText, { parse_mode: "Markdown" }).catch(console.error);
+}
+
+function handleFieldEdit(msg) {
+    const chatId = msg.chat.id;
+    const state = userState[chatId];
+    if (!state || state.action !== 'editing_field') return;
+
+    const { field } = state;
+    const newValue = msg.text;
+
+    const db = readDb();
+    const profile = db.users[chatId];
+
+    if (field === 'age' && (isNaN(parseInt(newValue)) || parseInt(newValue) < 18)) {
+        bot.sendMessage(chatId, "Invalid age. Please enter a number and make sure you are over 18.");
+        return;
+    }
+
+    if (field === 'interests') {
+        profile[field] = newValue.split(',').map(s => s.trim());
+    } else {
+        profile[field] = newValue;
+    }
+    
+    writeDb(db);
+    bot.sendMessage(chatId, `✅ Your *${field}* has been updated successfully!`, { parse_mode: "Markdown" });
+    delete userState[chatId];
+    
+    viewProfile(chatId);
 }
 
 // --- DAILY COIN ---
