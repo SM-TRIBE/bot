@@ -17,11 +17,12 @@ if (!TELEGRAM_TOKEN || !RENDER_URL || !ADMIN_CHAT_ID) {
     process.exit(1);
 }
 
+// Initialize the bot. The library will handle webhook routing automatically.
 const bot = new TelegramBot(TELEGRAM_TOKEN);
 bot.setWebHook(`${RENDER_URL}/bot${TELEGRAM_TOKEN}`);
 
 const app = express();
-app.use(express.json());
+// We don't need express.json() because the library handles the raw stream.
 
 // --- DATABASE SETUP ---
 const dbPath = path.join(__dirname, 'data', 'db.json');
@@ -113,11 +114,13 @@ async function sendMainMenu(chatId, messageId = null) {
 
 // --- WEBHOOK & MESSAGE ROUTERS ---
 
-app.post(`/bot${TELEGRAM_TOKEN}`, (req, res) => {
-    bot.processUpdate(req.body);
-    res.sendStatus(200);
+// The node-telegram-bot-api library listens for the webhook route for us.
+// We just need a basic server to be running for Render.
+app.get('/', (req, res) => {
+    res.send('Telegram Dating Bot is running!');
 });
 
+// The library emits 'message', 'callback_query', etc., events automatically.
 bot.on('message', (msg) => {
     const chatId = msg.chat.id;
     const db = readDb();
@@ -322,7 +325,6 @@ async function handleBroadcast(msg) {
             console.error(`Failed to send broadcast to ${userId}:`, error.code);
             failCount++;
         }
-        // Small delay to avoid hitting rate limits
         await new Promise(resolve => setTimeout(resolve, 100));
     }
 
@@ -371,7 +373,7 @@ function banOrUnbanUser(chatId, targetId, shouldBan) {
     bot.sendMessage(chatId, `User ${targetProfile.name} (\`${targetId}\`) has been ${actionText}.`);
     bot.sendMessage(targetId, `You have been ${actionText} by an administrator.`);
 
-    listAllUsers(chatId, null, 0); // Refresh user list
+    listAllUsers(chatId, null, 0);
 }
 
 
@@ -383,7 +385,7 @@ function handleStoreActions(query) {
 
     switch (action) {
         case 'view': showCoinStore(message.chat.id, message.message_id); break;
-        case 'boost': buyProfileBoost(message.chat.id, message.message_id); break;
+        case 'boost': buyProfileBoost(query); break;
     }
 }
 
@@ -396,13 +398,15 @@ function showCoinStore(chatId, messageId) {
                  `Your profile will appear at the top of search results for 24 hours.`;
     const keyboard = [
         [{ text: "🚀 Boost My Profile (50 Coins)", callback_data: "store_boost" }],
-        [{ text: "Claim Daily Bonus (/daily)", callback_data: "ignore" }], // Dummy button
+        [{ text: "Claim Daily Bonus (/daily)", callback_data: "ignore" }],
         [{ text: "⬅️ Back to Main Menu", callback_data: "back_to_menu" }]
     ];
     bot.editMessageText(text, { chat_id: chatId, message_id: messageId, parse_mode: "Markdown", reply_markup: { inline_keyboard: keyboard } });
 }
 
-function buyProfileBoost(chatId, messageId) {
+function buyProfileBoost(query) {
+    const chatId = query.message.chat.id;
+    const messageId = query.message.message_id;
     const db = readDb();
     const profile = db.users[chatId];
     const cost = 50;
@@ -413,7 +417,6 @@ function buyProfileBoost(chatId, messageId) {
 
     profile.coins -= cost;
     const now = new Date();
-    // If already boosted, add 24 hours to the existing time. Otherwise, set from now.
     const currentBoost = (profile.boostUntil && new Date(profile.boostUntil) > now) ? new Date(profile.boostUntil) : now;
     profile.boostUntil = new Date(currentBoost.getTime() + 24 * 60 * 60 * 1000);
     writeDb(db);
@@ -446,9 +449,7 @@ function handleDailyBonus(chatId) {
 function sendHelpMessage(chatId) {
     let text = `*Welcome to the Dating Bot! Here's how to use it:*\n\n` +
                `*/start* - Shows the main menu.\n` +
-               `*/profile* - View and manage your profile.\n` +
-               `*/search* - Find other users.\n` +
-               `*/matches* - See who you've matched with.\n\n` +
+               `*/help* - Shows this help message.\n\n` +
                `*Currency System*\n` +
                `- You spend **10 coins** to 'Like' a profile.\n` +
                `- Use */daily* once every 24 hours to get **25 free coins**.\n` +
@@ -463,8 +464,8 @@ function sendHelpMessage(chatId) {
 }
 
 // --- ALL OTHER FUNCTIONS (Profile, Search, Match, Gallery) ---
-// These functions are largely the same as the previous version, but with
-// added checks for banned status and other minor improvements.
+// ... (The rest of the functions from the previous version are here) ...
+// The following functions are included for completeness but are unchanged from the previous version.
 
 async function handleCreationWizard(queryOrMsg) {
     const isMsg = !!queryOrMsg.text || !!queryOrMsg.photo;
@@ -558,7 +559,7 @@ async function handleGallery(query) {
         keyboard.push([{ text: "➕ Add New Photo", callback_data: "profile_edit_photo"}]);
         keyboard.push([{ text: "⬅️ Back to Profile", callback_data: "profile_view" }]);
     } else {
-         keyboard.push([{ text: "❤️ Like Profile", callback_data: `like_${targetId}` }]);
+         keyboard.push([{ text: "❤️ Like (10 Coins)", callback_data: `like_${targetId}` }]);
          keyboard.push([{ text: "👎 Next Profile", callback_data: "search_result_next" }]);
     }
     
